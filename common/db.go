@@ -11,6 +11,7 @@ import (
 
 var db *mongo.Database
 
+// GetDBCollection returns a collection from the database with the given name (col)
 func GetDBCollection(col string) *mongo.Collection {
 	return db.Collection(col)
 }
@@ -20,6 +21,7 @@ func InitDB() error {
 	if uri == "" {
 		return errors.New("you must set your 'MONGODB_URI' environmental variable. See\n\t https://www.mongodb.com/docs/drivers/go/current/usage-examples/#environment-variable")
 	}
+	// connect to the database using the uri provided by the user (or the default) context.Background() is used to provide a context for the connection
 	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(uri))
 	if err != nil {
 		return err

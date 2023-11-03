@@ -19,7 +19,7 @@ func AddBookGroup(app *fiber.App) {
 }
 
 func getBooks(c *fiber.Ctx) error {
-	coll := common.GetDBCollection("books")
+	coll := common.GetDBCollection("books") //
 
 	// find all books
 	books := make([]models.Book, 0)
