@@ -1,4 +1,5 @@
-# fiber-mongo-example
+# fiber-veggies-backend
+
 
 A simple CRUD app that showcases how you can use Fiber and MongoDB together
 
