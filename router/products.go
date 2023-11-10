@@ -1,6 +1,19 @@
 package router
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"mime/multipart"
+	"os"
+	"path/filepath"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bmdavis419/fiber-mongo-example/common"
 	"github.com/bmdavis419/fiber-mongo-example/models"
 	"github.com/gofiber/fiber/v2"
@@ -75,17 +88,16 @@ func getProduct(c *fiber.Ctx) error {
 }
 
 type createPTO struct {
-	Name        string  `json:"name" bson:"name"`
-	Image       string  `json:"image" bson:"image"`
-	Description string  `json:"description" bson:"description"`
-	Price       float64 `json:"price" bson:"price"`
-	MinQuantity int     `json:"minQuantity" bson:"minQuantity"`
-	SellerId    string  `json:"sellerId" bson:"sellerId"`
+	Name        string                `form:"name" bson:"name"`
+	Image       *multipart.FileHeader `form:"image" bson:"image"`
+	Description string                `form:"description" bson:"description"`
+	Price       string                `form:"price" bson:"price"`
+	MinQuantity int                   `form:"minQuantity" bson:"minQuantity"`
+	SellerId    string                `form:"sellerId" bson:"sellerId"`
 }
 
 func createProduct(c *fiber.Ctx) error {
 	// Validate the body
-	// p := new(models.Product)
 	p := new(createPTO)
 	if err := c.BodyParser(p); err != nil {
 		return c.Status(400).JSON(fiber.Map{
@@ -93,9 +105,59 @@ func createProduct(c *fiber.Ctx) error {
 		})
 	}
 
+	awsAccessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	awsSecretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	// Retrieve AWS region from environment variable
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		log.Println("AWS_REGION environment variable is not set.")
+		return c.Status(500).JSON(fiber.Map{
+			"error":   "Failed to load AWS S3 config",
+			"message": "AWS_REGION environment variable is not set.",
+		})
+	}
+
+	// Setup S3 uploader
+	// cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(awsRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(awsAccessKeyID, awsSecretAccessKey, "")),
+	)
+	if err != nil {
+		log.Printf("error: %v", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error":   "Failed to load AWS S3 config",
+			"message": err.Error(),
+		})
+	}
+
+	client := s3.NewFromConfig(cfg)
+	uploader := manager.NewUploader(client)
+
+	// Handle product image upload
+	imageURL, err := handleProductUpload(c, uploader)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"error":   "Failed to upload product image",
+			"message": err.Error(),
+		})
+	}
+
+	// Set the imageURL in the product struct
+
+	newData := &models.CreatePDB{
+		Name:        p.Name,
+		Image:       imageURL,
+		Description: p.Description,
+		Price:       p.Price,
+		MinQuantity: p.MinQuantity,
+		SellerId:    p.SellerId,
+	}
+
 	// Create the product
 	coll := common.GetDBCollection("products")
-	result, err := coll.InsertOne(c.Context(), p)
+	result, err := coll.InsertOne(c.Context(), newData)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"error":   "Failed to create product",
@@ -110,19 +172,18 @@ func createProduct(c *fiber.Ctx) error {
 	})
 }
 
-type updatePTO struct {
-	Name        string  `json:"name,omitempty" bson:"name,omitempty"`
-	Image       string  `json:"image,omitempty" bson:"image,omitempty"`
-	Description string  `json:"description,omitempty" bson:"description,omitempty"`
-	Price       float64 `json:"price,omitempty" bson:"price,omitempty"`
-	MinQuantity int     `json:"minQuantity,omitempty" bson:"minQuantity,omitempty"`
-	SellerId    string  `json:"sellerId,omitempty" bson:"sellerId,omitempty"`
+type updatePTODB struct {
+	Name        string                `form:"name,omitempty" bson:"name,omitempty"`
+	Image       *multipart.FileHeader `form:"image,omitempty" bson:"image,omitempty"`
+	Description string                `form:"description,omitempty" bson:"description,omitempty"`
+	Price       string                `form:"price,omitempty" bson:"price,omitempty"`
+	MinQuantity int                   `form:"minQuantity,omitempty" bson:"minQuantity,omitempty"`
+	SellerId    string                `form:"sellerId,omitempty" bson:"sellerId,omitempty"`
 }
 
 func updateProduct(c *fiber.Ctx) error {
 	// Validate the body
-	// p := new(models.Product)
-	p := new(updatePTO)
+	p := new(models.UpdatePTO)
 	if err := c.BodyParser(p); err != nil {
 		return c.Status(400).JSON(fiber.Map{
 			"error": "Invalid body",
@@ -189,4 +250,59 @@ func deleteProduct(c *fiber.Ctx) error {
 		"result": result,
 		"msg":    "Product deleted successfully",
 	})
+}
+
+func handleProductUpload(c *fiber.Ctx, uploader *manager.Uploader) (string, error) {
+	file, err := c.FormFile("image")
+	if err != nil {
+		return "", err
+	}
+
+	f, err := file.Open()
+	if err != nil {
+		return "", err
+	}
+
+	// Determine Content-Type based on the file extension (you can enhance this logic)
+	contentType := determineContentType(file.Filename)
+
+	result, err := uploader.Upload(context.TODO(), &s3.PutObjectInput{
+		Bucket:             aws.String("grain"),
+		Key:                aws.String("grains/gi" + file.Filename),
+		Body:               f,
+		ACL:                "public-read",
+		ContentType:        aws.String(contentType),
+		ContentDisposition: aws.String("inline"), // Set to "inline" to display in the browser
+
+	}, func(u *manager.Uploader) {
+		u.PartSize = 6 * 1024 * 1024 // Override the PartSize to 6 MiB
+	})
+
+	if err != nil {
+		var mu manager.MultiUploadFailure
+		if errors.As(err, &mu) {
+			fmt.Println("Error:", mu)
+			uploadID := mu.UploadID()
+			return uploadID, err
+		} else {
+			fmt.Println("Error:", err.Error())
+			return "", err
+		}
+	}
+
+	return result.Location, nil
+}
+
+func determineContentType(filename string) string {
+	// You can implement more sophisticated logic to determine the Content-Type
+	// For simplicity, this example uses a basic mapping based on file extension
+	switch filepath.Ext(filename) {
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	default:
+		// Set a default Content-Type or handle unknown types accordingly
+		return "application/octet-stream"
+	}
 }
